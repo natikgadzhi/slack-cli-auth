@@ -22,7 +22,7 @@ struct SlackAuthApp: App {
     .windowResizability(.contentSize)
     .commands {
       CommandGroup(replacing: .appInfo) {
-        Button("About Slack Auth") { About.showPanel() }
+        Button("About Slack Auth", action: About.showPanel)
       }
     }
   }

@@ -99,7 +99,7 @@ struct LoginWindowContent: View {
         .accessibilityIdentifier("workspacePicker")
       }
       Spacer()
-      Button("Save to Keychain") { save() }
+      Button("Save to Keychain", action: save)
         .keyboardShortcut(.defaultAction)
         .disabled(resolvedSelection == nil)
         .accessibilityIdentifier("saveButton")
@@ -119,7 +119,7 @@ struct LoginWindowContent: View {
           .foregroundStyle(.secondary)
       }
       Spacer()
-      Button("Quit") { NSApplication.shared.terminate(nil) }
+      Button("Quit", action: quit)
         .keyboardShortcut(.defaultAction)
         .accessibilityIdentifier("quitButton")
     }
@@ -134,7 +134,7 @@ struct LoginWindowContent: View {
         .font(.system(size: 13))
         .fixedSize(horizontal: false, vertical: true)
       Spacer()
-      Button("Try again") { manager.retrySelection() }
+      Button("Try again", action: manager.retrySelection)
         .accessibilityIdentifier("retryButton")
     }
     .accessibilityIdentifier("failureRow")
@@ -179,5 +179,9 @@ struct LoginWindowContent: View {
   private func save() {
     guard let workspace = resolvedSelection else { return }
     Task { await manager.select(workspace) }
+  }
+
+  private func quit() {
+    NSApplication.shared.terminate(nil)
   }
 }
