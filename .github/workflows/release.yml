@@ -67,13 +67,7 @@ jobs:
             | tee "${dmg_path}.sha256"
           echo "sha256=$(shasum -a 256 "${dmg_path}" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
-      # SLSA build-provenance attestation. GitHub only allows this for public
-      # repos (or orgs/enterprise) — on a private user repo the API returns
-      # "Feature not available", so skip it there rather than failing the whole
-      # release. It auto-enables once the repo is made public; the published
-      # SHA-256 still provides integrity verification in the meantime.
       - name: Attest build provenance
-        if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: ${{ steps.artifact.outputs.dmg_path }}
