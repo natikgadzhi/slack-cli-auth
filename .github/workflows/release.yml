@@ -1,0 +1,93 @@
+name: Release
+
+# Tag-triggered build → sign → notarize → DMG, with verifiable provenance:
+# a SLSA build-provenance attestation, a published SHA-256, and the commit SHA
+# baked into the app (shown in About). Build/sign/notarize happen ONLY here —
+# no laptop is ever in the published trust path.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create the Release + upload assets
+  id-token: write # OIDC token for the SLSA attestation signer
+  attestations: write # store the attestation
+
+jobs:
+  release:
+    name: Build, notarize, attest, release
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Build signed + notarized DMG
+        env:
+          # Apple signing + notarization (same contract as the sibling apps).
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_NOTARY_API_KEY_BASE64: ${{ secrets.APPLE_NOTARY_API_KEY_BASE64 }}
+          APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          # Crash-reporting DSN, baked in only for official releases.
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          # GITHUB_SHA (the tagged commit) is already in the env → embedded in the
+          # build. "build N" auto-increments per release run.
+          CURRENT_PROJECT_VERSION: ${{ github.run_number }}
+        run: scripts/build-dmg.sh
+
+      - name: Resolve artifact path
+        id: artifact
+        shell: bash
+        run: |
+          dmg_path="$(find build/release -maxdepth 1 -name '*.dmg' -print | head -n 1)"
+          if [[ -z "${dmg_path}" ]]; then
+            echo "No DMG found in build/release" >&2
+            exit 1
+          fi
+          echo "dmg_path=${dmg_path}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute SHA-256
+        id: checksum
+        shell: bash
+        run: |
+          dmg_path="${{ steps.artifact.outputs.dmg_path }}"
+          # Write the checksum with just the basename (not the build/release/…
+          # path) so `shasum -a 256 -c SlackAuth-*.dmg.sha256` verifies the
+          # downloaded file directly.
+          ( cd "$(dirname "${dmg_path}")" && shasum -a 256 "$(basename "${dmg_path}")" ) \
+            | tee "${dmg_path}.sha256"
+          echo "sha256=$(shasum -a 256 "${dmg_path}" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ steps.artifact.outputs.dmg_path }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.artifact.outputs.dmg_path }}
+            ${{ steps.artifact.outputs.dmg_path }}.sha256
+          body: |
+            ### Verifying this build
+
+            **SHA-256:** `${{ steps.checksum.outputs.sha256 }}`
+
+            ```sh
+            shasum -a 256 SlackAuth*.dmg                  # matches the hash above
+            gh attestation verify SlackAuth*.dmg --repo natikgadzhi/slack-cli-auth
+            ```
+
+            The running app's About panel shows the commit it was built from. See
+            [SECURITY.md](https://github.com/natikgadzhi/slack-cli-auth/blob/main/SECURITY.md).

@@ -1,0 +1,60 @@
+name: SlackAuth
+options:
+  bundleIdPrefix: io.respawn
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+packages:
+  SlackAuthKit:
+    path: Packages/SlackAuthKit
+  Sentry:
+    url: https://github.com/getsentry/sentry-cocoa
+    from: 8.0.0
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  SlackAuth:
+    # An .app bundle (not a bare tool): WKWebView's WebContent helper process
+    # only launches from inside a real, signed bundle.
+    type: application
+    platform: macOS
+    sources:
+      - App
+    dependencies:
+      - package: SlackAuthKit
+        product: SlackAuthKit
+      - package: Sentry
+        product: Sentry
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.respawn.SlackAuth
+        # The shipped app bundle is "Slack Auth.app" (two words); the target and
+        # scheme stay "SlackAuth".
+        PRODUCT_NAME: "Slack Auth"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Real Info.plist (not GENERATE_INFOPLIST_FILE): we inject custom keys
+        # (SENTRY_DSN, GitCommitSHA) that the generated-plist path can't carry.
+        INFOPLIST_FILE: App/Info.plist
+        # Injected at build time only for official releases (the release workflow
+        # passes these to xcodebuild). Empty by default → local/CI/open-source
+        # builds have no DSN (telemetry stays off) and show "local build".
+        SENTRY_DSN: ""
+        GIT_COMMIT_SHA: ""
+        # Stable code signature, on purpose. macOS keys a Keychain item's
+        # no-prompt access on the app's designated requirement (team + bundle id)
+        # for a real identity, but on the per-build cdhash for an ad-hoc
+        # signature. A Developer ID signature is stable across rebuilds — and
+        # matches the eventual notarized release. CI passes CODE_SIGNING_ALLOWED=NO
+        # (no certs on the runner).
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        DEVELOPMENT_TEAM: "9YKSA5B4FP"
+      configs:
+        # Hardened runtime on for Release so the notarized build passes (Debug
+        # keeps get-task-allow for the debugger; Release must not).
+        Release:
+          ENABLE_HARDENED_RUNTIME: YES
