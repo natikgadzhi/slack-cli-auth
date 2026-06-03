@@ -90,63 +90,58 @@ struct LoginCover: View {
       Color(nsColor: .windowBackgroundColor)
         .ignoresSafeArea()
       content
-        .frame(maxWidth: 420)
-        .padding(40)
     }
   }
 
   @ViewBuilder private var content: some View {
     switch state {
     case .finishing:
-      VStack(spacing: 16) {
-        ProgressView()
-          .controlSize(.large)
-        Text(statusMessage.isEmpty ? "Finishing sign-in…" : statusMessage)
-          .font(.headline)
-        Text("Hang tight — capturing and verifying your Slack tokens.")
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-          .multilineTextAlignment(.center)
-      }
-      .accessibilityIdentifier("finishingCover")
+      finishing
+        .frame(maxWidth: 420)
+        .padding(40)
 
     case .saved:
-      VStack(spacing: 14) {
-        Image(systemName: "checkmark.seal.fill")
-          .font(.system(size: 44))
-          .foregroundStyle(.green)
-        Text(savedHeadline)
-          .font(.headline)
-          .multilineTextAlignment(.center)
-        Text("slack-cli will pick these up automatically. You can quit now.")
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-          .multilineTextAlignment(.center)
-        Button("Quit", action: onQuit)
-          .controlSize(.large)
-          .keyboardShortcut(.defaultAction)
-      }
-      .accessibilityIdentifier("savedCover")
+      SuccessView(headline: savedHeadline, onDone: onQuit)
 
     case .failed(let reason):
-      VStack(spacing: 14) {
-        Image(systemName: "exclamationmark.triangle.fill")
-          .font(.system(size: 40))
-          .foregroundStyle(.orange)
-        Text(reason)
-          .font(.headline)
-          .multilineTextAlignment(.center)
-          .fixedSize(horizontal: false, vertical: true)
-        HStack(spacing: 12) {
-          Button("Clear stored tokens", action: onClear)
-          Button("Try again", action: onRetry)
-            .keyboardShortcut(.defaultAction)
-        }
-      }
-      .accessibilityIdentifier("failedCover")
+      failed(reason)
+        .frame(maxWidth: 420)
+        .padding(40)
 
     case .new, .signingIn:
       EmptyView()
     }
+  }
+
+  private var finishing: some View {
+    VStack(spacing: 16) {
+      ProgressView()
+        .controlSize(.large)
+      Text(statusMessage.isEmpty ? "Finishing sign-in…" : statusMessage)
+        .font(.headline)
+      Text("Hang tight — capturing and verifying your Slack tokens.")
+        .font(.subheadline)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.center)
+    }
+    .accessibilityIdentifier("finishingCover")
+  }
+
+  private func failed(_ reason: String) -> some View {
+    VStack(spacing: 14) {
+      Image(systemName: "exclamationmark.triangle.fill")
+        .font(.system(size: 40))
+        .foregroundStyle(.orange)
+      Text(reason)
+        .font(.headline)
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
+      HStack(spacing: 12) {
+        Button("Clear stored tokens", action: onClear)
+        Button("Try again", action: onRetry)
+          .keyboardShortcut(.defaultAction)
+      }
+    }
+    .accessibilityIdentifier("failedCover")
   }
 }
