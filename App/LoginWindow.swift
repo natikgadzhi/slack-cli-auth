@@ -16,172 +16,137 @@ struct LoginWebView: NSViewRepresentable {
   func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
 
+/// The window: the Slack sign-in web view, with an opaque cover that fades in the
+/// moment authentication completes — so the user never sees their Slack content,
+/// just a clean "finishing up" → success flow while tokens are captured and saved.
 @MainActor
 struct LoginWindowContent: View {
   let manager: SlackAuthManager
 
-  @State private var selectedTeamID: String?
   @State private var confirmingClear = false
 
   var body: some View {
-    VStack(spacing: 0) {
+    ZStack {
       LoginWebView(webView: manager.loginWebView)
-        .frame(minWidth: 560, minHeight: 660)
+        .frame(minWidth: 560, minHeight: 680)
 
-      Divider()
-      statusBar
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial)
+      if showsCover {
+        LoginCover(
+          state: manager.state,
+          statusMessage: manager.statusMessage,
+          savedHeadline: savedHeadline,
+          onRetry: manager.retry,
+          onQuit: quit,
+          onClear: { confirmingClear = true }
+        )
+        .transition(.opacity)
+      }
     }
-    .animation(.snappy, value: manager.state)
+    .animation(.easeInOut(duration: 0.28), value: manager.state)
     .confirmationDialog(
       "Clear the stored Slack tokens?", isPresented: $confirmingClear
     ) {
-      Button("Clear tokens", role: .destructive) { manager.clearStoredTokens() }
+      Button("Clear tokens", role: .destructive, action: manager.clearStoredTokens)
       Button("Cancel", role: .cancel) {}
     } message: {
       Text("slack-cli will need new tokens until you sign in again here.")
     }
   }
 
-  /// The footer changes with the flow: a hint while signing in, the workspace
-  /// picker once tokens are captured, progress while validating, and a result.
-  @ViewBuilder private var statusBar: some View {
+  private var showsCover: Bool {
     switch manager.state {
-    case .new, .authenticating:
-      signingInHint
-    case .awaitingSelection:
-      workspacePicker
-    case .validating:
-      HStack(spacing: 10) {
-        ProgressView().controlSize(.small)
-        Text("Verifying tokens with Slack…")
-      }
-      .accessibilityIdentifier("validatingStatus")
-    case .saved:
-      savedResult
-    case .failed(let reason):
-      failureRow(reason)
+    case .finishing, .saved, .failed: true
+    case .new, .signingIn: false
     }
-  }
-
-  private var signingInHint: some View {
-    HStack(spacing: 10) {
-      Image(systemName: "person.badge.key")
-        .foregroundStyle(.secondary)
-      VStack(alignment: .leading, spacing: 2) {
-        Text("Sign in to Slack above.")
-          .font(.system(size: 13, weight: .medium))
-        Text("Once you're in, your workspaces will appear here to choose from.")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-      Spacer()
-      clearButton
-    }
-    .accessibilityIdentifier("signingInHint")
-  }
-
-  private var workspacePicker: some View {
-    HStack(spacing: 12) {
-      VStack(alignment: .leading, spacing: 4) {
-        Text("Save tokens for this workspace")
-          .font(.system(size: 13, weight: .medium))
-        Picker("Workspace", selection: $selectedTeamID) {
-          ForEach(manager.workspaces) { workspace in
-            Text(workspaceLabel(workspace)).tag(Optional(workspace.teamID))
-          }
-        }
-        .labelsHidden()
-        .frame(maxWidth: 320)
-        .accessibilityIdentifier("workspacePicker")
-      }
-      Spacer()
-      Button("Save to Keychain", action: save)
-        .keyboardShortcut(.defaultAction)
-        .disabled(resolvedSelection == nil)
-        .accessibilityIdentifier("saveButton")
-    }
-    .onAppear { ensureSelection() }
-  }
-
-  private var savedResult: some View {
-    HStack(spacing: 10) {
-      Image(systemName: "checkmark.seal.fill")
-        .foregroundStyle(.green)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(savedHeadline)
-          .font(.system(size: 13, weight: .medium))
-        Text("slack-cli will pick these up automatically. You can quit now.")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-      Spacer()
-      Button("Quit", action: quit)
-        .keyboardShortcut(.defaultAction)
-        .accessibilityIdentifier("quitButton")
-    }
-    .accessibilityIdentifier("savedResult")
-  }
-
-  private func failureRow(_ reason: String) -> some View {
-    HStack(spacing: 10) {
-      Image(systemName: "exclamationmark.triangle.fill")
-        .foregroundStyle(.orange)
-      Text(reason)
-        .font(.system(size: 13))
-        .fixedSize(horizontal: false, vertical: true)
-      Spacer()
-      Button("Try again", action: manager.retrySelection)
-        .accessibilityIdentifier("retryButton")
-    }
-    .accessibilityIdentifier("failureRow")
-  }
-
-  private var clearButton: some View {
-    Button("Clear stored tokens") { confirmingClear = true }
-      .controlSize(.small)
-      .accessibilityIdentifier("clearButton")
-  }
-
-  // MARK: - Helpers
-
-  private var resolvedSelection: Workspace? {
-    manager.workspaces.first { $0.teamID == selectedTeamID }
   }
 
   private var savedHeadline: String {
     switch (manager.savedTeam, manager.savedUser) {
-    case (.some(let team), .some(let user)):
-      return "Saved tokens for \(team) (as \(user))."
-    case (.some(let team), nil):
-      return "Saved tokens for \(team)."
-    default:
-      return "Saved your Slack tokens."
+    case (.some(let team), .some(let user)): "Saved tokens for \(team) (as \(user))."
+    case (.some(let team), nil): "Saved tokens for \(team)."
+    default: "Saved your Slack tokens."
     }
-  }
-
-  private func workspaceLabel(_ workspace: Workspace) -> String {
-    if !workspace.domain.isEmpty, workspace.domain != workspace.name {
-      return "\(workspace.name) (\(workspace.domain).slack.com)"
-    }
-    return workspace.name
-  }
-
-  private func ensureSelection() {
-    if resolvedSelection == nil {
-      selectedTeamID = manager.workspaces.first?.teamID
-    }
-  }
-
-  private func save() {
-    guard let workspace = resolvedSelection else { return }
-    Task { await manager.select(workspace) }
   }
 
   private func quit() {
     NSApplication.shared.terminate(nil)
+  }
+}
+
+/// The opaque overlay shown once sign-in completes: a spinner while finishing, a
+/// confirmation when saved, or an error with retry. Its solid background hides
+/// the web view loading behind it.
+@MainActor
+struct LoginCover: View {
+  let state: AuthenticationState
+  let statusMessage: String
+  let savedHeadline: String
+  let onRetry: () -> Void
+  let onQuit: () -> Void
+  let onClear: () -> Void
+
+  var body: some View {
+    ZStack {
+      Color(nsColor: .windowBackgroundColor)
+        .ignoresSafeArea()
+      content
+        .frame(maxWidth: 420)
+        .padding(40)
+    }
+  }
+
+  @ViewBuilder private var content: some View {
+    switch state {
+    case .finishing:
+      VStack(spacing: 16) {
+        ProgressView()
+          .controlSize(.large)
+        Text(statusMessage.isEmpty ? "Finishing sign-in…" : statusMessage)
+          .font(.headline)
+        Text("Hang tight — capturing and verifying your Slack tokens.")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          .multilineTextAlignment(.center)
+      }
+      .accessibilityIdentifier("finishingCover")
+
+    case .saved:
+      VStack(spacing: 14) {
+        Image(systemName: "checkmark.seal.fill")
+          .font(.system(size: 44))
+          .foregroundStyle(.green)
+        Text(savedHeadline)
+          .font(.headline)
+          .multilineTextAlignment(.center)
+        Text("slack-cli will pick these up automatically. You can quit now.")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+          .multilineTextAlignment(.center)
+        Button("Quit", action: onQuit)
+          .controlSize(.large)
+          .keyboardShortcut(.defaultAction)
+      }
+      .accessibilityIdentifier("savedCover")
+
+    case .failed(let reason):
+      VStack(spacing: 14) {
+        Image(systemName: "exclamationmark.triangle.fill")
+          .font(.system(size: 40))
+          .foregroundStyle(.orange)
+        Text(reason)
+          .font(.headline)
+          .multilineTextAlignment(.center)
+          .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 12) {
+          Button("Clear stored tokens", action: onClear)
+          Button("Try again", action: onRetry)
+            .keyboardShortcut(.defaultAction)
+        }
+      }
+      .accessibilityIdentifier("failedCover")
+
+    case .new, .signingIn:
+      EmptyView()
+    }
   }
 }

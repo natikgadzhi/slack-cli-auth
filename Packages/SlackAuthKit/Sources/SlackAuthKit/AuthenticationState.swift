@@ -1,19 +1,18 @@
-/// Lifecycle of the login flow as it progresses from a fresh web view to stored
-/// tokens.
+/// Lifecycle of the login flow. V1 saves a single workspace and hides the web
+/// view as soon as authentication completes.
 public enum AuthenticationState: Sendable, Equatable {
   /// Nothing started yet.
   case new
-  /// The web view is loaded and the user is signing in; the capture poll is
-  /// running, waiting for an `xoxc` token and the `d` cookie to appear.
-  case authenticating
-  /// Tokens captured. One or more workspaces are available; the user must pick
-  /// which workspace's `xoxc` to store.
-  case awaitingSelection
-  /// A selected workspace is being checked against `auth.test`.
-  case validating
-  /// Tokens validated and written to the Keychain.
+  /// The web view is visible and the user is signing in (SSO/email/2FA). The
+  /// capture poll runs, waiting for the workspace token and `d` cookie.
+  case signingIn
+  /// Authentication succeeded and the web view is covered. Tokens are being
+  /// captured, validated against `auth.test`, and written to the Keychain —
+  /// all automatically. `statusMessage` carries the current step.
+  case finishing
+  /// Tokens validated and written.
   case saved
-  /// Something went wrong (validation rejected, write failed, network error).
+  /// Something went wrong (validation rejected, write failed, capture timed out).
   /// Carries a human-readable, secret-free reason.
   case failed(String)
 }

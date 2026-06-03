@@ -3,15 +3,14 @@ import Observation
 import WebKit
 import os
 
-/// Coordinates the interactive Slack login: owns the `WKWebView` the user signs
-/// into, snapshots the workspace `xoxc` tokens (from `localStorage`) and the
-/// shared `xoxd` `d` cookie (from the cookie store) once they appear, then —
-/// after the user picks a workspace — validates the pair against `auth.test` and
-/// writes both to the Keychain in the layout slack-cli reads.
+/// Coordinates the interactive Slack login. The user signs in in the web view;
+/// the moment authentication completes (a navigation to `app.slack.com/client/…`),
+/// the view is covered and the app automatically captures the active workspace's
+/// `xoxc` token plus the shared `xoxd` cookie, validates them against `auth.test`,
+/// and writes them to the Keychain in the layout slack-cli reads.
 ///
-/// Why a real WebView instead of scripted HTTP: Slack's login is a JS-rendered
-/// flow (SSO, email magic links, 2FA), so we let a genuine browser do the dance
-/// and read the resulting session out of the page and its cookies.
+/// V1 stores a single workspace — the one the user landed in. Multi-workspace
+/// selection can come later.
 @MainActor @Observable
 public final class SlackAuthManager: NSObject {
   private let secretStore: any SlackSecretStoring
@@ -19,25 +18,40 @@ public final class SlackAuthManager: NSObject {
 
   public private(set) var state: AuthenticationState = .new
 
-  /// Workspaces captured from the session, shown in the picker once present.
-  public private(set) var workspaces: [Workspace] = []
+  /// Step shown on the cover while `finishing` ("Finishing sign-in…",
+  /// "Verifying with Slack…", "Saving to Keychain…").
+  public private(set) var statusMessage = ""
 
   /// Authenticated team/user names from `auth.test`, shown on the success screen.
   public private(set) var savedTeam: String?
   public private(set) var savedUser: String?
 
-  /// Called when a capture/validation step throws — a seam for the app to report
-  /// the error (e.g. to crash telemetry) without the kit depending on a reporter.
+  /// Called when a capture step throws — a seam for the app to report the error
+  /// (e.g. to crash telemetry) without the kit depending on a reporter.
   public var onError: (@MainActor (any Error) -> Void)?
 
   private var webView: WKWebView?
   private var captureTask: Task<Void, Never>?
 
+  /// Workspaces read from the session (kept internal; V1 auto-picks one).
+  private var workspaces: [Workspace] = []
   /// The shared `d` cookie value, captured alongside the workspace tokens.
   private var capturedXoxd: String?
+  /// Team id of the workspace the user landed in (from the client URL).
+  private var activeTeamID: String?
+  /// Guards the validate+save step so the poll can't start it twice.
+  private var saving = false
+  /// Poll attempts spent waiting for tokens after auth, for a timeout.
+  private var finishingAttempts = 0
 
-  /// How often the capture poll re-reads the page while waiting for login.
+  #if DEBUG
+    private var debugRelay: WebConsoleRelay?
+  #endif
+
+  /// How often the capture poll re-reads the page while waiting.
   private let pollInterval: Duration = .seconds(1.5)
+  /// ~25s of polling after auth before giving up reading the tokens.
+  private let maxFinishingAttempts = 16
 
   public init(secretStore: any SlackSecretStoring) {
     self.secretStore = secretStore
@@ -49,8 +63,25 @@ public final class SlackAuthManager: NSObject {
   /// store and "remember this device" reduces repeat 2FA prompts.
   public var loginWebView: WKWebView {
     if let webView { return webView }
-    let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+    let configuration = WKWebViewConfiguration()
+    #if DEBUG
+      // Forward the page's console + JS errors to /tmp/slackauth-webview.log.
+      let relay = WebConsoleRelay()
+      configuration.userContentController.addUserScript(
+        WKUserScript(
+          source: WebConsoleRelay.captureJS, injectionTime: .atDocumentStart,
+          forMainFrameOnly: false))
+      configuration.userContentController.add(relay, name: "slackAuthDebug")
+      debugRelay = relay
+    #endif
+    let webView = WKWebView(frame: .zero, configuration: configuration)
+    // Slack rejects WKWebView's default User-Agent ("browser is not supported"),
+    // so present as the installed desktop Safari. Must be set before any load.
+    webView.customUserAgent = SlackEndpoint.loginUserAgent
     webView.navigationDelegate = self
+    // SSO "Authenticate" opens the identity provider via window.open; without a
+    // UI delegate WKWebView silently drops it and the button does nothing.
+    webView.uiDelegate = self
     // Inspectable in debug only: a distributed release must not expose the
     // signed-in session's tokens to Safari's Web Inspector.
     #if DEBUG
@@ -60,35 +91,39 @@ public final class SlackAuthManager: NSObject {
     return webView
   }
 
-  /// Start login by loading the Slack web client; it redirects to sign-in when
-  /// the user isn't authenticated yet.
+  /// Start login by loading the Slack sign-in page.
   public func startLogin() {
-    let url = SlackEndpoint.app
+    let url = SlackEndpoint.signIn
     log.info("startLogin: loading \(url.absoluteString, privacy: .public)")
-    transition(to: .authenticating)
+    transition(to: .signingIn)
     loginWebView.load(URLRequest(url: url))
     startCapturePolling()
   }
 
-  /// Poll the page until both the workspace tokens and the `d` cookie are present.
-  /// Slack writes `localConfig_v2` asynchronously after the client boots — often
-  /// with no further navigation — so a single read on `didFinish` misses it.
+  /// Poll the page until the workspace tokens and the `d` cookie are present.
+  /// Slack writes `localConfig_v2` asynchronously after the client boots, so a
+  /// single read misses it.
   private func startCapturePolling() {
     guard captureTask == nil else { return }
     captureTask = Task { @MainActor [weak self] in
       while !Task.isCancelled {
-        guard let self, self.state == .authenticating else { return }
+        guard let self, self.isCapturing else { return }
         await self.attemptCapture()
-        if self.state != .authenticating { return }
+        if !self.isCapturing { return }
         try? await Task.sleep(for: self.pollInterval)
       }
     }
   }
 
+  private var isCapturing: Bool {
+    state == .signingIn || state == .finishing
+  }
+
   /// One capture attempt: read the workspace tokens and the `d` cookie. When both
-  /// are present, stop polling and move to workspace selection.
+  /// are present, hand off to the automatic validate + save. While `finishing`,
+  /// count misses toward a timeout so we don't spin forever behind the cover.
   private func attemptCapture() async {
-    guard let webView else { return }
+    guard let webView, !saving else { return }
     do {
       let result = try await webView.callAsyncJavaScript(
         SlackCapture.localConfigReadJS, arguments: [:], contentWorld: .page)
@@ -99,13 +134,19 @@ public final class SlackAuthManager: NSObject {
         let diag = SlackCapture.diagnostic(result)
         let haveCookie = dCookie != nil
         log.info("capture miss: \(diag, privacy: .public) dCookie=\(haveCookie, privacy: .public)")
+        if state == .finishing {
+          finishingAttempts += 1
+          if finishingAttempts > maxFinishingAttempts {
+            transition(to: .failed("Couldn't read your Slack tokens after signing in. Try again."))
+          }
+        }
         return
       }
 
       workspaces = parsed
       capturedXoxd = dCookie
       log.info("captured \(parsed.count, privacy: .public) workspace(s) + d cookie")
-      transition(to: .awaitingSelection)
+      await completeSave()
     } catch {
       log.error("capture error: \(error.localizedDescription, privacy: .public)")
       onError?(error)
@@ -124,23 +165,34 @@ public final class SlackAuthManager: NSObject {
     return nil
   }
 
-  /// Validate the selected workspace's tokens against `auth.test`, then store them
-  /// on success. The `xoxc`/`xoxd` are sanitized to the exact form slack-cli
-  /// expects before both validating and writing, so the bytes we verify are the
-  /// bytes we persist.
-  public func select(_ workspace: Workspace) async {
-    transition(to: .validating)
+  /// Validate the captured tokens for the active workspace and, on success, store
+  /// them. Runs automatically once tokens are captured; guarded so it runs once.
+  private func completeSave() async {
+    guard !saving else { return }
+    saving = true
+    defer { saving = false }
+
+    if state != .finishing {
+      transition(to: .finishing)
+    }
+
+    guard let workspace = chooseWorkspace() else {
+      transition(to: .failed("Couldn't find a workspace to save."))
+      return
+    }
+
+    statusMessage = "Verifying with Slack…"
     let xoxc = Sanitize.token(workspace.xoxc)
     let xoxd = Sanitize.xoxd(capturedXoxd ?? "")
 
     let result = await SlackTokenProbe.run(xoxc: xoxc, xoxd: xoxd)
     guard result.ok else {
-      let reason = Self.failureReason(result.error)
       log.error("auth.test rejected: \(result.error ?? "unknown", privacy: .public)")
-      transition(to: .failed(reason))
+      transition(to: .failed(Self.failureReason(result.error)))
       return
     }
 
+    statusMessage = "Saving to Keychain…"
     guard secretStore.write(SlackTokens(xoxc: xoxc, xoxd: xoxd)) else {
       log.error("keychain write failed")
       transition(to: .failed("Couldn't write the tokens to your Keychain."))
@@ -149,23 +201,32 @@ public final class SlackAuthManager: NSObject {
 
     savedTeam = result.team ?? (workspace.name.isEmpty ? nil : workspace.name)
     savedUser = result.user
-    log.info("saved tokens for the selected workspace")
+    log.info("saved tokens for the active workspace")
     transition(to: .saved)
   }
 
-  /// Return to the workspace picker after a failed attempt (tokens are still
-  /// captured in memory).
-  public func retrySelection() {
-    guard !workspaces.isEmpty else {
-      transition(to: .authenticating)
-      startCapturePolling()
-      return
+  /// The workspace the user landed in (match the client URL's team id), falling
+  /// back to the first captured workspace.
+  private func chooseWorkspace() -> Workspace? {
+    if let id = activeTeamID, let match = workspaces.first(where: { $0.teamID == id }) {
+      return match
     }
-    transition(to: .awaitingSelection)
+    return workspaces.first
   }
 
-  /// Remove any stored Slack tokens this app or slack-cli wrote. Independent of
-  /// the current capture session.
+  /// Retry after a failure. If tokens were already captured (e.g. a transient
+  /// Keychain write failure), just re-run validate + save; otherwise restart the
+  /// sign-in from scratch.
+  public func retry() {
+    guard case .failed = state else { return }
+    if !workspaces.isEmpty, capturedXoxd != nil {
+      Task { await completeSave() }
+    } else {
+      startLogin()
+    }
+  }
+
+  /// Remove any stored Slack tokens this app or slack-cli wrote.
   public func clearStoredTokens() {
     secretStore.clear()
     log.info("cleared stored tokens")
@@ -184,12 +245,35 @@ public final class SlackAuthManager: NSObject {
     }
   }
 
-  /// The single place `state` changes. Capture polling is meaningful only while
-  /// `.authenticating`, so leaving that state always stops it.
+  /// Enter the covered "finishing" phase once auth lands on the workspace client.
+  private func beginFinishing(activeTeamID: String?) {
+    guard state == .signingIn else { return }
+    self.activeTeamID = activeTeamID
+    finishingAttempts = 0
+    statusMessage = "Finishing sign-in…"
+    transition(to: .finishing)
+  }
+
+  private func isClientURL(_ url: URL) -> Bool {
+    url.host == "app.slack.com" && url.path.hasPrefix("/client/")
+  }
+
+  private func teamID(from url: URL) -> String? {
+    let parts = url.path.split(separator: "/").map(String.init)
+    guard let index = parts.firstIndex(of: "client"), index + 1 < parts.count else { return nil }
+    let candidate = parts[index + 1]
+    return candidate.hasPrefix("T") ? candidate : nil
+  }
+
+  /// The single place `state` changes. Stops the capture poll once we reach a
+  /// terminal state.
   private func transition(to newState: AuthenticationState) {
     state = newState
-    if newState != .authenticating {
+    switch newState {
+    case .saved, .failed, .new:
       cancelCapturePolling()
+    case .signingIn, .finishing:
+      break
     }
   }
 
@@ -200,10 +284,28 @@ public final class SlackAuthManager: NSObject {
 }
 
 extension SlackAuthManager: WKNavigationDelegate {
+  /// Cover the web view the instant we navigate into the workspace client — that
+  /// nav means auth succeeded, and covering before it paints keeps the user's
+  /// Slack content from flashing on screen.
+  public func webView(
+    _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction
+  ) async -> WKNavigationActionPolicy {
+    if let url = navigationAction.request.url, isClientURL(url) {
+      #if DEBUG
+        WebDebugLog.write("[nav] entering client \(url.absoluteString)")
+      #endif
+      beginFinishing(activeTeamID: teamID(from: url))
+    }
+    return .allow
+  }
+
   public func webView(
     _ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!
   ) {
     log.info("didStart: \(webView.url?.host ?? "<nil>", privacy: .public)")
+    #if DEBUG
+      WebDebugLog.write("[nav] start \(webView.url?.absoluteString ?? "<nil>")")
+    #endif
   }
 
   public func webView(
@@ -211,15 +313,41 @@ extension SlackAuthManager: WKNavigationDelegate {
     withError error: Error
   ) {
     log.error("didFailProvisional: \(error.localizedDescription, privacy: .public)")
+    #if DEBUG
+      WebDebugLog.write("[nav] failProvisional \(error.localizedDescription)")
+    #endif
   }
 
   public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     log.info("didFinish: \(webView.url?.host ?? "<nil>", privacy: .public)")
+    #if DEBUG
+      WebDebugLog.write("[nav] finish \(webView.url?.absoluteString ?? "<nil>")")
+    #endif
   }
 
   /// The web content process crashing is the classic "blank page" cause — log it
   /// loudly so we can tell it apart from a network/navigation failure.
   public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
     log.error("webContentProcessDidTerminate — WKWebView render process died")
+  }
+}
+
+extension SlackAuthManager: WKUIDelegate {
+  /// Slack's SSO "Authenticate" (and "open in new tab" links) call `window.open`,
+  /// which asks the UI delegate for a new web view. We have only one window, so
+  /// load the request in the existing view — the session and cookies stay in one
+  /// place, and the IdP round-trip redirects back to Slack here.
+  public func webView(
+    _ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+    for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures
+  ) -> WKWebView? {
+    #if DEBUG
+      WebDebugLog.write(
+        "[popup] window.open -> \(navigationAction.request.url?.absoluteString ?? "<nil>")")
+    #endif
+    if navigationAction.targetFrame == nil {
+      webView.load(navigationAction.request)
+    }
+    return nil
   }
 }

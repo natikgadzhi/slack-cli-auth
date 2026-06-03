@@ -88,16 +88,37 @@ public final class KeychainSlackSecretStore: SlackSecretStoring, @unchecked Send
 
   private func writeItem(service: String, value: String) -> Bool {
     guard let data = value.data(using: .utf8) else { return false }
-    // Delete first by the bare primary key (service + account) so an item written
-    // by slack-cli or an older build — possibly with different accessibility — is
-    // replaced rather than colliding.
-    SecItemDelete(baseQuery(service: service) as CFDictionary)
-    var attributes = baseQuery(service: service)
+    let base = baseQuery(service: service)
+
+    // Try to add fresh. If an item already exists (e.g. slack-cli wrote one and
+    // its ACL won't let us delete it), fall back to updating that item's value in
+    // place. Update only touches the data, so it works even when delete/add would
+    // collide. We still try a delete first to clear any stale accessibility, but
+    // ignore its result — the add/update below is what matters.
+    SecItemDelete(base as CFDictionary)
+
+    var attributes = base
     attributes[kSecValueData] = data
     // Match go-keyring's accessibility (AccessibleWhenUnlocked): readable only
     // while the Mac is unlocked. These are bearer credentials.
     attributes[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlocked
-    return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
+
+    var status = SecItemAdd(attributes as CFDictionary, nil)
+    if status == errSecDuplicateItem {
+      status = SecItemUpdate(base as CFDictionary, [kSecValueData: data] as CFDictionary)
+    }
+
+    #if DEBUG
+      if status != errSecSuccess {
+        WebDebugLog.write(
+          "[keychain] write \(service) failed: OSStatus=\(status) "
+            + "(\(SecCopyErrorMessageString(status, nil) as String? ?? "?"))")
+      } else {
+        WebDebugLog.write("[keychain] write \(service): ok")
+      }
+    #endif
+
+    return status == errSecSuccess
   }
 
   private func baseQuery(service: String) -> [CFString: Any] {
