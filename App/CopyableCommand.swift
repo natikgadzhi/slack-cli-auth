@@ -12,7 +12,7 @@ struct CopyableCommand: View {
   }
 
   var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 10) {
+    HStack(spacing: 10) {
       Text(command)
         .font(.body.monospaced())
         .textSelection(.enabled)
@@ -21,12 +21,15 @@ struct CopyableCommand: View {
         .frame(maxWidth: .infinity, alignment: .leading)
 
       Button(action: copy) {
-        Label(copied ? "Copied" : "Copy command", systemImage: copied ? "checkmark" : "doc.on.doc")
-          .labelStyle(.iconOnly)
-          .contentTransition(.symbolEffect(.replace))
+        // Fixed-size icon so swapping checkmark/doc.on.doc never resizes the row.
+        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+          .foregroundStyle(copied ? Color.green : .secondary)
+          .frame(width: 18, height: 18)
+          .contentShape(.rect)
       }
       .buttonStyle(.borderless)
       .help("Copy to clipboard")
+      .accessibilityLabel(copied ? "Copied" : "Copy command")
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 10)
@@ -36,9 +39,10 @@ struct CopyableCommand: View {
   private func copy() {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(command, forType: .string)
+    // Instant feedback — no transition. Reverts shortly after.
     copied = true
     Task {
-      try? await Task.sleep(for: .seconds(2))
+      try? await Task.sleep(for: .seconds(1))
       copied = false
     }
   }

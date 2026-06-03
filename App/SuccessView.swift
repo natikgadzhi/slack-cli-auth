@@ -71,6 +71,8 @@ private struct SlackCLISection: View {
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.vertical, 10)
+      .padding(.horizontal, 6)
     } label: {
       Label("Use it with slack-cli", systemImage: "terminal")
     }
@@ -104,6 +106,8 @@ private struct KeychainSection: View {
           .foregroundStyle(.secondary)
       }
       .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.vertical, 10)
+      .padding(.horizontal, 6)
     } label: {
       Label("Where your tokens are saved", systemImage: "lock.fill")
     }
