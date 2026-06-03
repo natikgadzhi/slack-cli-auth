@@ -13,7 +13,7 @@ enum About {
   private static let security = URL(
     string: "https://github.com/natikgadzhi/slack-cli-auth/blob/main/SECURITY.md")!
 
-  static func showPanel() {
+  @MainActor static func showPanel() {
     NSApplication.shared.activate(ignoringOtherApps: true)
     NSApplication.shared.orderFrontStandardAboutPanel(options: [.credits: credits()])
   }

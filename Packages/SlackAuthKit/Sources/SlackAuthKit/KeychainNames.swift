@@ -1,41 +1,24 @@
 import Foundation
 
-/// Keychain coordinates that must match slack-cli's `internal/config/config.go`
-/// exactly, so the items this app writes are the ones the CLI reads. Service
-/// names and the account name honor the same environment overrides.
+/// Keychain coordinates that must match slack-cli's defaults so the items this
+/// app writes are the ones the CLI reads.
+///
+/// slack-cli (a CLI) lets you override the service/account names via environment
+/// variables. This is a GUI app launched from Finder/Dock, which inherits none of
+/// your shell's environment — so those overrides could never reach us, and if you
+/// did set them for slack-cli we'd mismatch no matter what. We therefore match
+/// slack-cli's *default* resolution, which is what every normal install uses.
 public enum KeychainNames {
-  /// `kSecAttrAccount` for both items. Resolution order (first non-empty wins),
-  /// ported from `config.KeychainAccount`:
-  ///   1. `$SLACK_KEYCHAIN_ACCOUNT`
-  ///   2. the current login name (`NSUserName()`, == os/user.Current().Username)
-  ///   3. `$USER`
-  ///   4. the literal `"slack-cli"` (guarantees non-empty)
-  ///
-  /// `environment` is injectable so the resolution order is unit-testable without
-  /// touching the process environment.
-  public static func account(
-    environment: [String: String] = ProcessInfo.processInfo.environment,
-    loginName: String = NSUserName()
-  ) -> String {
-    if let v = environment["SLACK_KEYCHAIN_ACCOUNT"], !v.isEmpty { return v }
-    if !loginName.isEmpty { return loginName }
-    if let v = environment["USER"], !v.isEmpty { return v }
-    return "slack-cli"
-  }
+  /// `kSecAttrService` for the xoxc token (slack-cli's default).
+  public static let xoxcService = "slack-xoxc-token"
+  /// `kSecAttrService` for the xoxd cookie (slack-cli's default).
+  public static let xoxdService = "slack-xoxd-token"
 
-  /// `kSecAttrService` for the `xoxc` token. Override: `$SLACK_XOXC_SERVICE`.
-  public static func xoxcService(
-    environment: [String: String] = ProcessInfo.processInfo.environment
-  ) -> String {
-    if let v = environment["SLACK_XOXC_SERVICE"], !v.isEmpty { return v }
-    return "slack-xoxc-token"
-  }
-
-  /// `kSecAttrService` for the `xoxd` cookie. Override: `$SLACK_XOXD_SERVICE`.
-  public static func xoxdService(
-    environment: [String: String] = ProcessInfo.processInfo.environment
-  ) -> String {
-    if let v = environment["SLACK_XOXD_SERVICE"], !v.isEmpty { return v }
-    return "slack-xoxd-token"
+  /// `kSecAttrAccount` for both items: the current login name, matching the
+  /// default slack-cli uses (`os/user.Current().Username`). `loginName` is
+  /// injectable for tests; the `"slack-cli"` fallback guarantees a non-empty
+  /// value in the (practically impossible) case of an empty login name.
+  public static func account(loginName: String = NSUserName()) -> String {
+    loginName.isEmpty ? "slack-cli" : loginName
   }
 }

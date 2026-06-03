@@ -43,8 +43,8 @@ public final class KeychainSlackSecretStore: SlackSecretStoring, @unchecked Send
   private let account: String
 
   public init(
-    xoxcService: String = KeychainNames.xoxcService(),
-    xoxdService: String = KeychainNames.xoxdService(),
+    xoxcService: String = KeychainNames.xoxcService,
+    xoxdService: String = KeychainNames.xoxdService,
     account: String = KeychainNames.account()
   ) {
     self.xoxcService = xoxcService

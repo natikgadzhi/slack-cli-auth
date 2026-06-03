@@ -2,7 +2,7 @@ name: SlackAuth
 options:
   bundleIdPrefix: io.respawn
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "15.6"
   createIntermediateGroups: true
 packages:
   SlackAuthKit:
